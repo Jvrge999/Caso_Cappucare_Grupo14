@@ -146,19 +146,43 @@ class CappucareViewModel : ViewModel() {
     }
 
     // =====================================================================
-    // Módulo "Movimientos de inventario"
+    // Módulo "Movimientos de inventario" (RN-03: El stock nunca queda negativo)
     // =====================================================================
 
     private val _movimientos = MutableStateFlow(MockData.movimientos)
     val movimientos: StateFlow<List<Movimiento>> = _movimientos.asStateFlow()
 
-    // TODO(equipo): validar movimiento aplicando RN-03
     fun validarMovimiento(
         productoId: String?,
         tipo: TipoMovimiento,
         cantidad: String,
         motivo: MotivoSalida?
-    ): ErroresMovimiento = ErroresMovimiento()
+    ): ErroresMovimiento {
+        val prod = productoPorId(productoId)
+        val cantNum = cantidad.trim().toIntOrNull()
+
+        val errorProd = if (prod == null) "Elige un producto" else null
+
+        // RN-03: En SALIDA no se puede pedir más de la cantidadDisponible
+        val errorCant = when {
+            cantNum == null || cantNum <= 0 -> "Ingresa una cantidad mayor que 0"
+            tipo == TipoMovimiento.SALIDA && prod != null && cantNum > prod.cantidadDisponible ->
+                "Solo hay ${prod.cantidadDisponible} disponibles"
+            else -> null
+        }
+
+        val errorMotivo = if (tipo == TipoMovimiento.SALIDA && motivo == null) {
+            "Elige el motivo de la salida"
+        } else {
+            null
+        }
+
+        return ErroresMovimiento(
+            producto = errorProd,
+            cantidad = errorCant,
+            motivo = errorMotivo
+        )
+    }
 
     // TODO(equipo): registrar movimiento y actualizar stock aplicando RN-03
     fun registrarMovimiento(
