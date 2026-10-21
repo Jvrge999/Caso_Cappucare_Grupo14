@@ -16,6 +16,9 @@ import com.cappucare.app.model.Usuario
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class CappucareViewModel : ViewModel() {
 
@@ -184,7 +187,6 @@ class CappucareViewModel : ViewModel() {
         )
     }
 
-    // TODO(equipo): registrar movimiento y actualizar stock aplicando RN-03
     fun registrarMovimiento(
         productoId: String,
         tipo: TipoMovimiento,
@@ -192,14 +194,64 @@ class CappucareViewModel : ViewModel() {
         motivo: MotivoSalida?,
         observacion: String
     ) {
-        // Pendiente para siguiente commit
+        val prod = productoPorId(productoId) ?: return
+        if (cantidad <= 0) return
+
+        // Segunda barrera RN-03 en el ViewModel: impedir salida mayor al stock disponible
+        if (tipo == TipoMovimiento.SALIDA && cantidad > prod.cantidadDisponible) {
+            return
+        }
+
+        val fechaActual = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date())
+        val nombreResp = _usuarioActivo.value?.nombre ?: "Personal autorizado"
+        val nuevoId = "M${_movimientos.value.size + 1}"
+
+        val nuevoMov = Movimiento(
+            id = nuevoId,
+            productoId = productoId,
+            fecha = fechaActual,
+            tipo = tipo,
+            cantidad = cantidad,
+            motivo = if (tipo == TipoMovimiento.SALIDA) motivo else null,
+            observacion = observacion,
+            responsable = nombreResp
+        )
+        _movimientos.value = _movimientos.value + nuevoMov
+
+        val nuevaCantidad = if (tipo == TipoMovimiento.INGRESO) {
+            prod.cantidadDisponible + cantidad
+        } else {
+            prod.cantidadDisponible - cantidad
+        }
+
+        val nuevoEstado = when {
+            nuevaCantidad == 0 && prod.estado == EstadoProducto.DISPONIBLE -> EstadoProducto.AGOTADO
+            nuevaCantidad > 0 && prod.estado == EstadoProducto.AGOTADO -> EstadoProducto.DISPONIBLE
+            else -> prod.estado
+        }
+
+        _productos.value = _productos.value.map { actual ->
+            if (actual.id == productoId) {
+                actual.copy(cantidadDisponible = nuevaCantidad, estado = nuevoEstado)
+            } else {
+                actual
+            }
+        }
     }
 
     // =====================================================================
     // Módulo "Consulta y reposición"
     // =====================================================================
 
-    fun historialDe(productoId: String?): List<Movimiento> = _movimientos.value
+    fun historialDe(productoId: String?): List<Movimiento> {
+        return _movimientos.value
+            .filter { productoId == null || it.productoId == productoId }
+            .sortedByDescending { it.fecha }
+    }
 
-    fun productosBajoMinimo(): List<Producto> = emptyList()
+    fun productosBajoMinimo(): List<Producto> {
+        return _productos.value.filter {
+            it.estado != EstadoProducto.DADO_DE_BAJA && it.cantidadDisponible < it.nivelMinimo
+        }
+    }
 }
