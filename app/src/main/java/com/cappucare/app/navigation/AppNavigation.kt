@@ -1,6 +1,7 @@
 package com.cappucare.app.navigation
 
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -27,25 +28,12 @@ object Rutas {
     const val REPOSICION = "reposicion"
 }
 
-/**
- * Flujo de pantallas (un solo NavHost y un único CappucareViewModel compartido):
- *
- *   LOGIN ──(login OK)──> PANEL
- *   PANEL ──> PRODUCTOS ──> PRODUCTO_DETALLE ──> PRODUCTO_FORM (editar)
- *                       └─> PRODUCTO_FORM (nuevo)      ├─> MOVIMIENTO
- *                                                      └─> HISTORIAL (de ese producto)
- *   PANEL ──> MOVIMIENTO | HISTORIAL (todos) | REPOSICION ──> PRODUCTO_DETALLE
- *
- * El producto elegido se comparte a través del ViewModel (seleccionarProducto), igual que en
- * la Guía 11: no se pasan argumentos por la ruta.
- *
- * Botón atrás: el atrás nativo de Android funciona solo (lo maneja el NavHost). Al ingresar,
- * LOGIN se saca de la pila; "Cerrar sesión" limpia la pila completa y vuelve a LOGIN.
- */
 @Composable
 fun AppNavigation(
     navController: NavHostController = rememberNavController(),
-    viewModel: CappucareViewModel = viewModel()
+    viewModel: CappucareViewModel = viewModel(
+        factory = CappucareViewModel.factory(LocalContext.current)
+    )
 ) {
     val cerrarSesion: () -> Unit = {
         viewModel.logout()

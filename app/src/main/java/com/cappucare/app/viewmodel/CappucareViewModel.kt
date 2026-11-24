@@ -1,7 +1,13 @@
 package com.cappucare.app.viewmodel
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
 import com.cappucare.app.data.MockData
+import com.cappucare.app.data.local.AppDatabase
+import com.cappucare.app.data.local.toDomain
+import com.cappucare.app.data.local.toEntity
 import com.cappucare.app.model.CategoriaInsumo
 import com.cappucare.app.model.ErroresMovimiento
 import com.cappucare.app.model.ErroresProducto
@@ -16,14 +22,17 @@ import com.cappucare.app.model.Usuario
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-class CappucareViewModel : ViewModel() {
+class CappucareViewModel(
+    private val db: AppDatabase? = null
+) : ViewModel() {
 
     // =====================================================================
-    // Autenticación (RF-00)
+    // Autenticación y permisos por perfil (RF-00)
     // =====================================================================
 
     private val _usuarioActivo = MutableStateFlow<Usuario?>(null)
@@ -31,6 +40,50 @@ class CappucareViewModel : ViewModel() {
 
     private val _errorLogin = MutableStateFlow<String?>(null)
     val errorLogin: StateFlow<String?> = _errorLogin.asStateFlow()
+
+    private val _mensajeRetroalimentacion = MutableStateFlow<String?>(null)
+    val mensajeRetroalimentacion: StateFlow<String?> = _mensajeRetroalimentacion.asStateFlow()
+
+    // =====================================================================
+    // Estado reactivo respaldado por Room (o MockData en tests unitarios)
+    // =====================================================================
+
+    private val _productos = MutableStateFlow(MockData.productos)
+    val productos: StateFlow<List<Producto>> = _productos.asStateFlow()
+
+    private val _movimientos = MutableStateFlow(MockData.movimientos)
+    val movimientos: StateFlow<List<Movimiento>> = _movimientos.asStateFlow()
+
+    private val _productoSeleccionadoId = MutableStateFlow<String?>(null)
+    val productoSeleccionadoId: StateFlow<String?> = _productoSeleccionadoId.asStateFlow()
+
+    init {
+        db?.let { database ->
+            viewModelScope.launch {
+                database.precargarSiEstaVacia()
+            }
+            viewModelScope.launch {
+                database.productoDao().obtenerTodos().collect { lista ->
+                    if (lista.isNotEmpty()) {
+                        _productos.value = lista.map { it.toDomain() }
+                    }
+                }
+            }
+            viewModelScope.launch {
+                database.movimientoDao().obtenerTodos().collect { lista ->
+                    _movimientos.value = lista.map { it.toDomain() }
+                }
+            }
+        }
+    }
+
+    fun limpiarErrorLogin() {
+        _errorLogin.value = null
+    }
+
+    fun limpiarMensajeRetroalimentacion() {
+        _mensajeRetroalimentacion.value = null
+    }
 
     fun login(usuario: String, clave: String): Boolean {
         val uLimpio = usuario.trim()
@@ -48,6 +101,7 @@ class CappucareViewModel : ViewModel() {
         return if (encontrado != null) {
             _usuarioActivo.value = encontrado
             _errorLogin.value = null
+            _mensajeRetroalimentacion.value = null
             true
         } else {
             _errorLogin.value = "Usuario o clave incorrectos"
@@ -55,26 +109,38 @@ class CappucareViewModel : ViewModel() {
         }
     }
 
-    fun entrarModoDesarrollo(perfil: Perfil) {
-        _usuarioActivo.value = MockData.usuarios.first { it.perfil == perfil }
-        _errorLogin.value = null
-    }
-
     fun logout() {
         _usuarioActivo.value = null
         _errorLogin.value = null
         _productoSeleccionadoId.value = null
+        _mensajeRetroalimentacion.value = null
+    }
+
+    fun puedeGestionarCatalogo(): Boolean {
+        return _usuarioActivo.value?.perfil == Perfil.ENCARGADO
+    }
+
+    fun puedeRegistrarTipoMovimiento(tipo: TipoMovimiento): Boolean {
+        val perfil = _usuarioActivo.value?.perfil ?: return false
+        return when (perfil) {
+            Perfil.ENCARGADO -> true
+            Perfil.USUARIO_AUTORIZADO -> tipo == TipoMovimiento.SALIDA
+        }
+    }
+
+    fun validarPermisoAccion(accion: String): String? {
+        val perfil = _usuarioActivo.value?.perfil
+        if (perfil == null) return "Debes iniciar sesión para realizar esta acción"
+        return when (perfil) {
+            Perfil.ENCARGADO -> null
+            Perfil.USUARIO_AUTORIZADO ->
+                "Acceso restringido para Usuario autorizado: no tienes permiso para $accion"
+        }
     }
 
     // =====================================================================
     // Módulo "Gestión de productos" (RF-01, RF-02, RF-03, RF-08, RN-04)
     // =====================================================================
-
-    private val _productos = MutableStateFlow(MockData.productos)
-    val productos: StateFlow<List<Producto>> = _productos.asStateFlow()
-
-    private val _productoSeleccionadoId = MutableStateFlow<String?>(null)
-    val productoSeleccionadoId: StateFlow<String?> = _productoSeleccionadoId.asStateFlow()
 
     fun seleccionarProducto(id: String?) {
         _productoSeleccionadoId.value = id
@@ -87,8 +153,8 @@ class CappucareViewModel : ViewModel() {
         return _productos.value.filter { prod ->
             val coincideCat = categoria == null || prod.categoria == categoria
             val coincideTxt = q.isEmpty() ||
-                prod.nombre.contains(q, ignoreCase = true) ||
-                prod.codigo.contains(q, ignoreCase = true)
+                    prod.nombre.contains(q, ignoreCase = true) ||
+                    prod.codigo.contains(q, ignoreCase = true)
             coincideCat && coincideTxt
         }
     }
@@ -122,7 +188,13 @@ class CappucareViewModel : ViewModel() {
         )
     }
 
-    fun guardarProducto(producto: Producto) {
+    fun guardarProducto(producto: Producto): Boolean {
+        val errorPermiso = validarPermisoAccion("crear o editar productos")
+        if (errorPermiso != null) {
+            _mensajeRetroalimentacion.value = errorPermiso
+            return false
+        }
+
         if (producto.id.isBlank()) {
             val nuevoId = "P${_productos.value.size + 1}"
             val nuevo = producto.copy(
@@ -131,29 +203,48 @@ class CappucareViewModel : ViewModel() {
                 estado = EstadoProducto.DISPONIBLE
             )
             _productos.value = _productos.value + nuevo
-        } else {
-            _productos.value = _productos.value.map { actual ->
-                if (actual.id == producto.id) {
-                    producto.copy(cantidadDisponible = actual.cantidadDisponible)
-                } else {
-                    actual
-                }
+            db?.let { database ->
+                viewModelScope.launch { database.productoDao().insertar(nuevo.toEntity()) }
             }
+            _mensajeRetroalimentacion.value = "Producto '${nuevo.nombre}' creado correctamente"
+        } else {
+            val actual = productoPorId(producto.id)
+            val actualizado = producto.copy(
+                cantidadDisponible = actual?.cantidadDisponible ?: producto.cantidadDisponible
+            )
+            _productos.value = _productos.value.map {
+                if (it.id == producto.id) actualizado else it
+            }
+            db?.let { database ->
+                viewModelScope.launch { database.productoDao().actualizar(actualizado.toEntity()) }
+            }
+            _mensajeRetroalimentacion.value = "Producto '${actualizado.nombre}' actualizado correctamente"
         }
+        return true
     }
 
-    fun cambiarEstado(productoId: String, nuevoEstado: EstadoProducto) {
-        _productos.value = _productos.value.map { prod ->
-            if (prod.id == productoId) prod.copy(estado = nuevoEstado) else prod
+    fun cambiarEstado(productoId: String, nuevoEstado: EstadoProducto): Boolean {
+        val errorPermiso = validarPermisoAccion("cambiar el estado de productos")
+        if (errorPermiso != null) {
+            _mensajeRetroalimentacion.value = errorPermiso
+            return false
         }
+
+        val actual = productoPorId(productoId) ?: return false
+        val actualizado = actual.copy(estado = nuevoEstado)
+        _productos.value = _productos.value.map { prod ->
+            if (prod.id == productoId) actualizado else prod
+        }
+        db?.let { database ->
+            viewModelScope.launch { database.productoDao().actualizar(actualizado.toEntity()) }
+        }
+        _mensajeRetroalimentacion.value = "Estado actualizado a ${nuevoEstado.name}"
+        return true
     }
 
     // =====================================================================
     // Módulo "Movimientos de inventario" (RN-03: El stock nunca queda negativo)
     // =====================================================================
-
-    private val _movimientos = MutableStateFlow(MockData.movimientos)
-    val movimientos: StateFlow<List<Movimiento>> = _movimientos.asStateFlow()
 
     fun validarMovimiento(
         productoId: String?,
@@ -166,7 +257,6 @@ class CappucareViewModel : ViewModel() {
 
         val errorProd = if (prod == null) "Elige un producto" else null
 
-        // RN-03: En SALIDA no se puede pedir más de la cantidadDisponible
         val errorCant = when {
             cantNum == null || cantNum <= 0 -> "Ingresa una cantidad mayor que 0"
             tipo == TipoMovimiento.SALIDA && prod != null && cantNum > prod.cantidadDisponible ->
@@ -193,13 +283,28 @@ class CappucareViewModel : ViewModel() {
         cantidad: Int,
         motivo: MotivoSalida?,
         observacion: String
-    ) {
-        val prod = productoPorId(productoId) ?: return
-        if (cantidad <= 0) return
+    ): Boolean {
+        if (!puedeRegistrarTipoMovimiento(tipo)) {
+            _mensajeRetroalimentacion.value =
+                "Movimiento rechazado: tu perfil no tiene permiso para registrar movimientos de tipo ${tipo.name}"
+            return false
+        }
+
+        val prod = productoPorId(productoId)
+        if (prod == null) {
+            _mensajeRetroalimentacion.value = "Movimiento rechazado: producto no encontrado"
+            return false
+        }
+        if (cantidad <= 0) {
+            _mensajeRetroalimentacion.value = "Movimiento rechazado: la cantidad debe ser mayor que 0"
+            return false
+        }
 
         // Segunda barrera RN-03 en el ViewModel: impedir salida mayor al stock disponible
         if (tipo == TipoMovimiento.SALIDA && cantidad > prod.cantidadDisponible) {
-            return
+            _mensajeRetroalimentacion.value =
+                "Movimiento rechazado (RN-03): solo hay ${prod.cantidadDisponible} disponibles para ${prod.nombre}"
+            return false
         }
 
         val fechaActual = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date())
@@ -230,13 +335,25 @@ class CappucareViewModel : ViewModel() {
             else -> prod.estado
         }
 
+        val productoActualizado = prod.copy(
+            cantidadDisponible = nuevaCantidad,
+            estado = nuevoEstado
+        )
+
         _productos.value = _productos.value.map { actual ->
-            if (actual.id == productoId) {
-                actual.copy(cantidadDisponible = nuevaCantidad, estado = nuevoEstado)
-            } else {
-                actual
+            if (actual.id == productoId) productoActualizado else actual
+        }
+
+        db?.let { database ->
+            viewModelScope.launch {
+                database.movimientoDao().insertar(nuevoMov.toEntity())
+                database.productoDao().actualizar(productoActualizado.toEntity())
             }
         }
+
+        _mensajeRetroalimentacion.value =
+            "Movimiento registrado: ${tipo.name} de $cantidad en ${prod.nombre}"
+        return true
     }
 
     // =====================================================================
@@ -253,5 +370,15 @@ class CappucareViewModel : ViewModel() {
         return _productos.value.filter {
             it.estado != EstadoProducto.DADO_DE_BAJA && it.cantidadDisponible < it.nivelMinimo
         }
+    }
+
+    companion object {
+        fun factory(context: Context): ViewModelProvider.Factory =
+            object : ViewModelProvider.Factory {
+                @Suppress("UNCHECKED_CAST")
+                override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                    return CappucareViewModel(AppDatabase.getInstance(context)) as T
+                }
+            }
     }
 }
